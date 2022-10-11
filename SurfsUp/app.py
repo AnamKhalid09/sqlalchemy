@@ -25,10 +25,14 @@ Base.prepare(engine, reflect=True)
 # Save reference to the tables
 Measurement = Base.classes.measurement
 Station = Base.classes.station
+
 #################################################
 # Flask Setup
 #################################################
 app = Flask(__name__)
+
+# Create our session (link) from Python to the DB
+session = Session(engine)
 
 
 #################################################
@@ -43,8 +47,8 @@ def welcome():
         f"/api/v1.0/precipitation<br>"
         f"/api/v1.0/stations<br>"
         f"/api/v1.0/tobs<br>"
-        f"/api/v1.0/<start><br>"
-        f"/api/v1.0/<start>/<end><br>"
+        f"/api/v1.0/temp/<start><br>"
+        f"/api/v1.0/temp/<start>/<end><br>"
     )
 
 # create precipitation route of last 12 months of precipitation data
@@ -52,14 +56,13 @@ def welcome():
 
 @app.route("/api/v1.0/precipitation")
 def prcp():
-
-    recent_precipitation = session.query(str(Measurement.date), Measurement.prcp)\
-        .filter(Measurement.date > '2016-08-22')\
-        .filter(Measurement.date <= '2017-08-23')\
-        .order_by(Measurement.date).all()
+    query_date = dt.date(2017, 8, 23) - dt.timedelta(days=365)
+    Query = session.query(Measurement.date, Measurement.prcp)\
+        .filter(Measurement.date >= query_date).all()
+    session.close()
 
     # convert results to a dictionary with date as key and prcp as value
-    precipitation_dict = dict(recent_precipitation)
+    precipitation_dict = {date: prcp for date, prcp in Query}
 
     # return json list of dictionary
     return jsonify(precipitation_dict)
@@ -71,7 +74,6 @@ def prcp():
 def stations():
 
     stations = session.query(Station.name, Station.station).all()
-
     # convert results to a dict
     stations_dict = dict(stations)
 
@@ -82,44 +84,50 @@ def stations():
 # create tobs route of temp observations for most active station over last 12 months
 @app.route("/api/v1.0/tobs")
 def tobs():
-
-    tobs_station = session.query(str(Measurement.date), Measurement.tobs)\
-        .filter(Measurement.date > '2016-08-23')\
-        .filter(Measurement.date <= '2017-08-23')\
-        .filter(Measurement.station == "USC00519281")\
-        .order_by(Measurement.date).all()
-
-    # convert results to dict(I decided to to a dict here instead of a list in order to show the dates along with the temperature for each date)
-    tobs_dict = dict(tobs_station)
+    query_date = dt.date(2017, 8, 23) - dt.timedelta(days=365)
+    tobs_station = session.query(Measurement.tobs)\
+        .filter(Measurement.date >= query_date)\
+        .filter(Measurement.station == "USC00519281").all()
+    session.close()
+   # Unravel results into a 1D array and convert to a list
+    temps = list(np.ravel(tobs_station))
 
     # return json list of dict
-    return jsonify(tobs_dict)
+    return jsonify(temps=temps)
 
 
 # create start and start/end route
 # min, average, and max temps for a given date range
-@app.route("/api/v1.0/<start>")
-@app.route("/api/v1.0/<start>/<end>")
-def start_date(start, end=None):
+@app.route("/api/v1.0/temp/<start>")
+@app.route("/api/v1.0/temp/<start>/<end>")
+def start_date(start=None, end=None):
 
-    q = session.query(str(func.min(Measurement.tobs)), str(
-        func.max(Measurement.tobs)), str(func.round(func.avg(Measurement.tobs))))
+    # Select statement
+    sel = [func.min(Measurement.tobs), func.avg(
+        Measurement.tobs), func.max(Measurement.tobs)]
+    if not end:
+        start = dt.datetime.strptime(start, "%m%d%Y")
+        results = session.query(*sel).\
+            filter(Measurement.date >= start).all()
 
-    if start:
-        q = q.filter(Measurement.date >= start)
+        session.close()
 
-    if end:
-        q = q.filter(Measurement.date <= end)
+        temps = list(np.ravel(results))
+        return jsonify(temps)
 
-    # convert results into a dictionary (I opted for a dictionary instead of a list here so that it was clear with labels which temp was the min, the max, and the average)
+    # calculate TMIN, TAVG, TMAX with start and stop
+    start = dt.datetime.strptime(start, "%m%d%Y")
+    end = dt.datetime.strptime(end, "%m%d%Y")
 
-    results = q.all()[0]
+    results = session.query(*sel).\
+        filter(Measurement.date >= start).\
+        filter(Measurement.date <= end).all()
 
-    keys = ["Min Temp", "Max Temp", "Avg Temp"]
+    session.close()
 
-    temp_dict = {keys[i]: results[i] for i in range(len(keys))}
-
-    return jsonify(temp_dict)
+    # Unravel results into a 1D array and convert to a list
+    temps = list(np.ravel(results))
+    return jsonify(temps=temps)
 
 
 if __name__ == '__main__':
